@@ -1,166 +1,99 @@
+# Portable BookStack Installer for Windows
 
-# BookStack Portable Installer for Windows
+A fully automated PowerShell script that creates a self-contained, portable installation of [BookStack](https://www.bookstackapp.com/) on Windows. 
 
-A single PowerShell script that creates a fully portable, self-contained BookStack installation on Windows. No Docker. No WSL. No XAMPP. Just double-click and go.
 
-## Why This Exists
+## 🚀 Features
 
-Installing BookStack on Windows is traditionally a nightmare. The official docs point you toward Docker or Linux, and the community solutions involve cobbling together XAMPP, manually configuring Apache, wrestling with PHP extensions, and sacrificing hours to cryptic error messages.
+*   **100% Portable:** The entire installation lives in a single folder (`C:\BookStack` by default). You can copy this folder to a USB drive or another computer, and it will just work.
+*   **Zero Dependencies:** The script automatically downloads and configures:
+    *   **Apache HTTPD 2.4:** Configured with `mod_fcgid` for FastCGI performance.
+    *   **PHP 8.x:** Optimized with JIT Compiler and OPcache enabled.
+    *   **MariaDB:** Performance-tuned portable database instance.
+    *   **Composer:** For dependency management.
+    *   **Portable Git:** For application updates.
+*   **Performance Tuned:** Pre-configured with caching (Route, View, Config) and database optimizations.
+*   **Automated:** Handles downloading, extraction, configuration, database creation, migrations, and shortcut creation.
 
-This script exists because **nobody should need a computer science degree to run a wiki.**
+## 📋 Prerequisites
 
-One command. Ten minutes. Done.
+*   **OS:** Windows.
+*   **PowerShell:** Version 5.1 or newer (pre-installed on Windows).
+*   **Internet Connection:** Required during installation to download components.
 
-## Who This Is For
+## 🛠️ Installation
 
-- **Small teams and home users** who want a private knowledge base without renting a server
-- **IT professionals** who need to deploy BookStack on Windows infrastructure
-- **Self-hosters** who are tired of Docker container sprawl
-- **Anyone** who just wants the damn thing to work
+1.  Download the script from this repository.
+2.  Open **PowerShell as Administrator**.
+3.  Run the script:
 
-## What Makes It Great
 
-### Truly Portable
+Script Parameters
+Parameter	Default	Description
+-RootPath	C:\BookStack	The folder where everything will be installed.
+-AppPort	8080	The port for the Apache web server.
+-DBPort	3366	The port for the MariaDB database.
+-DBPassword	bookstack123	The initial database password.
+🖥️ Usage
 
-The entire installation lives in a single folder. Want to move it to another PC? Copy the folder. Want to run it from a USB drive? Copy the folder. Want to back it up? You get the idea.
+Once installed, you will find the following batch files in your installation folder:
 
-### Zero Prerequisites
+    START-BOOKSTACK.bat
+    Starts both Apache and MariaDB in the background. This is the main launcher.
+    STOP-BOOKSTACK.bat
+    Stops all running services (Apache, PHP-CGI, MariaDB).
+    START-DATABASE.bat / STOP-DATABASE.bat
+    Controls only the database server.
+    START-APACHE.bat / STOP-APACHE.bat
+    Controls only the web server.
 
-The script downloads and configures everything automatically:
+Default Login Credentials
 
-- PHP 8.x (thread-safe build with all required extensions)
-- Composer (PHP package manager)
-- Portable Git
-- MariaDB (lightweight MySQL-compatible database)
-- BookStack application and all dependencies
+    URL: http://localhost:8080
+    Email: admin@admin.com
+    Password: password
 
-Your system stays clean. No global installations. No PATH pollution. No registry entries.
+    ⚠️ Important: Change these credentials immediately after your first login!
 
-### Batteries Included
+📂 Directory Structure
 
-After installation, you get simple batch files:
+The installation creates a self-contained environment:
+text
 
-- `START-BOOKSTACK.bat` — Launches everything and opens your browser
-- `STOP-BOOKSTACK.bat` — Gracefully shuts it all down
-- `START-DATABASE.bat` / `STOP-DATABASE.bat` — Manual database control if needed
-
-A desktop shortcut is created automatically.
-
-### Smart and Resilient
-
-- Detects already-downloaded components and skips them
-- Validates downloads with SHA256 checksums
-- Handles network failures gracefully
-- Cleans up after itself
-
-## Quick Start
-
-### Download and Run
-
-1. Download the powershell script
-2. Right-click → "Run with PowerShell" (as Administrator)
-3. Follow the prompts
-
-### After Installation
-
-1. Run `START-BOOKSTACK.bat` or use the desktop shortcut
-2. Open `http://localhost:8080` in your browser
-3. Log in with the default credentials:
-   - **Email:** `admin@admin.com`
-   - **Password:** `password`
-4. **Change the default password immediately**
-
-## System Requirements
-
-- Windows 10 or later (64-bit)
-- PowerShell 5.1 or later (included with Windows)
-- Administrator privileges (for initial setup only)
-- ~2 GB disk space
-- Internet connection (for initial download only)
-
-## Installation Directory Structure
-
-```
 C:\BookStack\
-├── php\                    # PHP runtime
-├── composer\               # Composer package manager
-├── git\                    # Portable Git
-├── mariadb\                # MariaDB database server
-├── app\                    # BookStack application
-├── data\
-│   └── mysql\              # Database files (your content lives here)
-├── temp\                   # Temporary files
-├── START-BOOKSTACK.bat     # Start everything
-├── STOP-BOOKSTACK.bat      # Stop everything
-├── START-DATABASE.bat      # Start database only
-├── STOP-DATABASE.bat       # Stop database only
-└── README.txt              # Quick reference
-```
+├── app\              # The BookStack application code
+├── apache\           # Apache HTTPD Web Server
+├── php\              # PHP Runtime (Thread Safe)
+├── mariadb\          # Database Server
+├── data\             # Database files (Your content lives here!)
+├── logs\             # Access and Error logs
+├── downloads\        # Cache of downloaded installers
+├── temp\             # Temporary session files
+└── START-BOOKSTACK.bat
 
-## Configuration
+🔄 How to Backup / Move
 
-### Changing the Port
+Because this is a portable installation, backing up or moving to a new machine is incredibly simple:
 
-By default, BookStack runs on port `8080` and MariaDB on port `3366`. To change these, edit the batch files and the `.env` file in the `app` folder.
+    Run STOP-BOOKSTACK.bat to ensure all services are closed.
+    Copy the entire C:\BookStack folder to your backup location or new computer.
+    On the new computer, simply run START-BOOKSTACK.bat.
 
-### Accessing from Other Devices
+🔧 Troubleshooting
 
-To access BookStack from other computers on your network:
+Port 8080 is already in use
+Edit apache\conf\httpd.conf and change Listen 8080 to a different port. Also update APP_URL in app\.env.
 
-1. Open the `.env` file in `C:\BookStack\app\`
-2. Change `APP_URL=http://localhost:8080` to `APP_URL=http://YOUR_IP:8080`
-3. Ensure Windows Firewall allows inbound connections on port 8080
+Visual C++ Redistributable Errors
+If Apache or PHP fails to start, you may need to install the latest Visual C++ Redistributable (vc_redist.x64.exe).
 
-### Backup
+Services won't start
+Check the logs\ folder. Specifically:
 
-Your data lives in two places:
+    logs\apache_error.log
+    logs\mariadb_error.log
+    logs\php_errors.log
 
-- `C:\BookStack\data\mysql\` — The database (users, pages, settings)
-- `C:\BookStack\app\storage\` — Uploaded files and images
+📜 License
 
-Copy these folders to back up everything.
-
-## Troubleshooting
-
-### "Port 8080 is already in use"
-
-Another application is using the port. Either close that application or edit the batch files to use a different port.
-
-### "MariaDB won't start"
-
-Check if another MySQL/MariaDB instance is running on port 3366. You can change the port in `C:\BookStack\mariadb\my.ini`.
-
-### "PHP errors in the browser"
-
-Run `STOP-BOOKSTACK.bat`, wait a few seconds, then run `START-BOOKSTACK.bat` again. If issues persist, check that antivirus software isn't blocking PHP.
-
-### "Can't access from another computer"
-
-Ensure Windows Firewall isn't blocking the connection. You may need to add an inbound rule for port 8080.
-
-
-## Uninstalling
-
-1. Run `STOP-BOOKSTACK.bat`
-2. Delete the `C:\BookStack` folder
-3. Delete the desktop shortcut
-
-That's it. Nothing else to clean up.
-
-## License
-
-This installer script is released under the MIT License.
-
-BookStack itself is licensed under the MIT License. See the [BookStack repository](https://github.com/BookStackApp/BookStack) for details.
-
-## Acknowledgments
-
-- [BookStack](https://www.bookstackapp.com/) — The excellent open-source wiki platform
-- [MariaDB](https://mariadb.org/) — The database that makes it all work
-- [PHP](https://www.php.net/) — Still powering the web after all these years
-
----
-
-**Made with frustration, then determination, then satisfaction.**
-
-*If this saved you time, consider [supporting BookStack development](https://www.bookstackapp.com/donate/).*
+This script is open-source. BookStack itself is licensed under the MIT license. All downloaded components (Apache, PHP, MariaDB) are subject to their respective licenses.
