@@ -2,6 +2,10 @@
 
 A fully automated PowerShell script that creates a self-contained, portable installation of [BookStack](https://www.bookstackapp.com/) on Windows. 
 
+Included Bookstack Control Center powershell script to manage portable Bookstack instances
+
+<img width="1924" height="1144" alt="image" src="https://github.com/user-attachments/assets/43752449-419f-47aa-bf89-ff3f9893d956" />
+
 
 ## 🚀 Features
 
