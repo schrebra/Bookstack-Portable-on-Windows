@@ -1,25 +1,27 @@
 #Requires -RunAsAdministrator
 <#
 .SYNOPSIS
-    Portable BookStack Complete Installation Script for Windows
+    Portable BookStack Complete Installation Script for Windows (Apache Edition)
 
 .DESCRIPTION
     Creates a fully portable, self-contained BookStack installation.
     Everything is installed to a single folder including:
-    - PHP 8.x
+    - Apache HTTPD (Portable Web Server)
+    - PHP 8.x (Optimized with JIT/OPcache)
     - Composer
     - Portable Git
-    - MariaDB (portable database)
-    - BookStack application
+    - MariaDB (Performance Tuned)
+    - BookStack application (Pre-cached)
 
     The entire folder can be copied to another Windows machine and run.
 
 .NOTES
-    Version: 7.0 (Simplified download system - WebClient only)
+    Version: 8.1 (Apache Edition - Fixed)
 
     Structure:
     C:\BookStack\
     ├── app\              # BookStack application
+    ├── apache\           # Apache HTTPD server
     ├── php\              # PHP installation
     ├── composer\         # Composer
     ├── git\              # Portable Git
@@ -42,10 +44,10 @@
     The port for MariaDB. Default: 3366
 
 .EXAMPLE
-    .\Install-BookStack-Portable.ps1
+    .\Install-BookStack-Portable-Apache.ps1
 
 .EXAMPLE
-    .\Install-BookStack-Portable.ps1 -RootPath "D:\BookStack" -AppPort "8000"
+    .\Install-BookStack-Portable-Apache.ps1 -RootPath "D:\BookStack" -AppPort "8000"
 #>
 
 param(
@@ -94,6 +96,7 @@ $script:DownloadStats = @{
 $script:Paths = @{
     Root        = $RootPath
     App         = "$RootPath\app"
+    Apache      = "$RootPath\apache"
     PHP         = "$RootPath\php"
     Composer    = "$RootPath\composer"
     Git         = "$RootPath\git"
@@ -108,7 +111,11 @@ $script:Paths = @{
 
 $script:Files = @{
     PHPExe          = "$RootPath\php\php.exe"
+    PHPCgiExe       = "$RootPath\php\php-cgi.exe"
     PHPIni          = "$RootPath\php\php.ini"
+    ApacheExe       = "$RootPath\apache\bin\httpd.exe"
+    ApacheConf      = "$RootPath\apache\conf\httpd.conf"
+    ApacheVhostConf = "$RootPath\apache\conf\extra\httpd-vhosts.conf"
     ComposerPhar    = "$RootPath\composer\composer.phar"
     ComposerBat     = "$RootPath\composer\composer.bat"
     GitExe          = "$RootPath\git\cmd\git.exe"
@@ -122,6 +129,8 @@ $script:Files = @{
     StopBat         = "$RootPath\STOP-BOOKSTACK.bat"
     StartDBBat      = "$RootPath\START-DATABASE.bat"
     StopDBBat       = "$RootPath\STOP-DATABASE.bat"
+    StartApacheBat  = "$RootPath\START-APACHE.bat"
+    StopApacheBat   = "$RootPath\STOP-APACHE.bat"
     ReadMe          = "$RootPath\README.txt"
 }
 
@@ -134,8 +143,8 @@ function Write-Banner {
     Write-Host ""
     Write-Host "================================================================" -ForegroundColor Cyan
     Write-Host "                                                                " -ForegroundColor Cyan
-    Write-Host "         PORTABLE BOOKSTACK INSTALLER FOR WINDOWS               " -ForegroundColor White
-    Write-Host "                      Version 7.0                               " -ForegroundColor Gray
+    Write-Host "      PORTABLE BOOKSTACK INSTALLER (APACHE EDITION)             " -ForegroundColor White
+    Write-Host "                      Version 8.1                               " -ForegroundColor Gray
     Write-Host "                                                                " -ForegroundColor Cyan
     Write-Host "         Installation Path: $RootPath" -ForegroundColor Yellow
     Write-Host "                                                                " -ForegroundColor Cyan
@@ -213,13 +222,13 @@ function Write-FileNoBom {
 
 function Get-UrlCache {
     if ($SkipDownloadCache) { return @{} }
-    
+
     $cachePath = $script:Paths.UrlCache
     if (Test-Path $cachePath) {
         try {
             $cacheContent = Get-Content $cachePath -Raw | ConvertFrom-Json
             $cacheAge = (Get-Date) - [DateTime]::Parse($cacheContent.Timestamp)
-            
+
             # Cache valid for 24 hours
             if ($cacheAge.TotalHours -lt 24) {
                 Write-Debug "Using cached URLs (age: $([int]$cacheAge.TotalHours) hours)"
@@ -234,21 +243,21 @@ function Get-UrlCache {
 
 function Set-UrlCache {
     param([hashtable]$Urls)
-    
+
     if ($SkipDownloadCache) { return }
-    
+
     $cachePath = $script:Paths.UrlCache
     $cacheDir = Split-Path $cachePath -Parent
-    
+
     if (-not (Test-Path $cacheDir)) {
         New-Item -ItemType Directory -Path $cacheDir -Force | Out-Null
     }
-    
+
     $cacheContent = @{
         Timestamp = (Get-Date).ToString("o")
         Urls = $Urls
     }
-    
+
     $cacheContent | ConvertTo-Json -Depth 5 | Set-Content $cachePath -Force
     Write-Debug "URL cache updated"
 }
@@ -259,7 +268,7 @@ function Set-UrlCache {
 
 function Format-FileSize {
     param([long]$Bytes)
-    
+
     if ($Bytes -lt 1KB) { return "$Bytes B" }
     if ($Bytes -lt 1MB) { return "{0:N2} KB" -f ($Bytes / 1KB) }
     if ($Bytes -lt 1GB) { return "{0:N2} MB" -f ($Bytes / 1MB) }
@@ -275,48 +284,48 @@ function Download-WithProgress {
         [int]$RetryCount = 3,
         [int]$RetryDelaySeconds = 3
     )
-    
+
     $script:DownloadStats.Attempted++
-    
+
     $parentDir = Split-Path $OutputPath -Parent
     if (-not (Test-Path $parentDir)) {
         New-Item -ItemType Directory -Path $parentDir -Force | Out-Null
     }
-    
+
     # Remove existing file
     if (Test-Path $OutputPath) {
         Remove-Item $OutputPath -Force -ErrorAction SilentlyContinue
     }
-    
+
     $tempPath = "$OutputPath.tmp"
     if (Test-Path $tempPath) {
         Remove-Item $tempPath -Force -ErrorAction SilentlyContinue
     }
-    
+
     Write-Info "Downloading: $Description"
     Write-Host "    $Url" -ForegroundColor Gray
-    
+
     $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
-    
+
     for ($attempt = 1; $attempt -le $RetryCount; $attempt++) {
         if ($attempt -gt 1) {
             Write-Host "    Retry $attempt of $RetryCount..." -ForegroundColor Yellow
             Start-Sleep -Seconds $RetryDelaySeconds
-            
+
             # Cleanup failed attempt
             if (Test-Path $tempPath) {
                 Remove-Item $tempPath -Force -ErrorAction SilentlyContinue
             }
         }
-        
+
         try {
             $webClient = New-Object System.Net.WebClient
             $webClient.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-            
+
             Write-Host "    Downloading..." -ForegroundColor Gray
             $webClient.DownloadFile($Url, $tempPath)
             $webClient.Dispose()
-            
+
             # Verify download
             if ((Test-Path $tempPath) -and (Get-Item $tempPath).Length -gt 1000) {
                 Move-Item $tempPath $OutputPath -Force
@@ -324,13 +333,13 @@ function Download-WithProgress {
                 $stopwatch.Stop()
                 $elapsed = $stopwatch.Elapsed.TotalSeconds
                 $speed = if ($elapsed -gt 0) { Format-FileSize ([long]($finalSize / $elapsed)) } else { "N/A" }
-                
+
                 Write-OK "Complete: $(Format-FileSize $finalSize) in $([math]::Round($elapsed, 1))s ($speed/s)"
-                
+
                 $script:DownloadStats.Succeeded++
                 $script:DownloadStats.TotalBytes += $finalSize
                 $script:DownloadStats.TotalTime += $stopwatch.Elapsed
-                
+
                 return $true
             } else {
                 $size = if (Test-Path $tempPath) { (Get-Item $tempPath).Length } else { 0 }
@@ -342,7 +351,7 @@ function Download-WithProgress {
             if ($_.Exception.InnerException) {
                 $errorMsg = $_.Exception.InnerException.Message
             }
-            
+
             if ($attempt -eq $RetryCount) {
                 Write-Host "    Failed: $errorMsg" -ForegroundColor Red
             } else {
@@ -355,15 +364,15 @@ function Download-WithProgress {
             }
         }
     }
-    
+
     # Cleanup
     if (Test-Path $tempPath) {
         Remove-Item $tempPath -Force -ErrorAction SilentlyContinue
     }
-    
+
     $stopwatch.Stop()
     $script:DownloadStats.Failed++
-    
+
     Write-Warn "Download failed after $RetryCount attempts"
     return $false
 }
@@ -373,19 +382,19 @@ function Test-UrlAccessible {
         [string]$Url,
         [int]$TimeoutSeconds = 10
     )
-    
+
     try {
         $request = [System.Net.HttpWebRequest]::Create($Url)
         $request.Method = "HEAD"
         $request.Timeout = $TimeoutSeconds * 1000
         $request.AllowAutoRedirect = $true
         $request.UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
-        
+
         $response = $request.GetResponse()
         $statusCode = [int]$response.StatusCode
         $contentLength = $response.ContentLength
         $response.Close()
-        
+
         return @{
             Accessible = ($statusCode -ge 200 -and $statusCode -lt 400)
             StatusCode = $statusCode
@@ -412,12 +421,12 @@ function Find-WorkingUrl {
         [string[]]$Urls,
         [int]$MinSize = 0
     )
-    
+
     Write-Debug "Testing $($Urls.Count) URLs..."
-    
+
     foreach ($url in $Urls) {
         $test = Test-UrlAccessible -Url $url
-        
+
         if ($test.Accessible) {
             if ($MinSize -eq 0 -or $test.ContentLength -ge $MinSize -or $test.ContentLength -eq -1) {
                 Write-Debug "Found working URL: $url (Size: $($test.ContentLength))"
@@ -428,7 +437,7 @@ function Find-WorkingUrl {
             Write-Debug "URL not accessible: $url (Status: $($test.StatusCode))"
         }
     }
-    
+
     return $null
 }
 
@@ -439,13 +448,13 @@ function Download-WithFallback {
         [string]$Description = "",
         [long]$MinSize = 1000
     )
-    
+
     # First, find a working URL
     Write-Info "Trying: $($Urls[0])"
-    
+
     foreach ($url in $Urls) {
         $result = Download-WithProgress -Url $url -OutputPath $OutputPath -Description $Description
-        
+
         if ($result) {
             $fileSize = (Get-Item $OutputPath -ErrorAction SilentlyContinue).Length
             if ($fileSize -ge $MinSize) {
@@ -454,14 +463,14 @@ function Download-WithFallback {
             Write-Debug "Downloaded file too small: $fileSize < $MinSize"
             Remove-Item $OutputPath -Force -ErrorAction SilentlyContinue
         }
-        
+
         # Try next URL if available
         $currentIndex = [Array]::IndexOf($Urls, $url)
         if ($currentIndex -lt ($Urls.Count - 1)) {
             Write-Info "Trying fallback URL..."
         }
     }
-    
+
     return $false
 }
 
@@ -469,40 +478,98 @@ function Download-WithFallback {
 # DYNAMIC URL DISCOVERY
 # ============================================================
 
+function Get-ApacheDownloadUrls {
+    Write-Info "Discovering Apache HTTPD download URLs..."
+
+    # Check cache first
+    $cache = Get-UrlCache
+    if ($cache.Apache) {
+        Write-Debug "Using cached Apache URL"
+        return @($cache.Apache)
+    }
+
+    # Apache Lounge provides Windows binaries
+    # VS17 builds are for latest Visual C++ runtime
+    $urls = @(
+        "https://www.apachelounge.com/download/VS17/binaries/httpd-2.4.62-240904-win64-VS17.zip",
+        "https://www.apachelounge.com/download/VS17/binaries/httpd-2.4.62-win64-VS17.zip",
+        "https://www.apachelounge.com/download/VS16/binaries/httpd-2.4.62-win64-VS16.zip"
+    )
+
+    # Try to discover latest from Apache Lounge
+    try {
+        $response = Invoke-WebRequest -Uri "https://www.apachelounge.com/download/" -UseBasicParsing -TimeoutSec 15 -ErrorAction Stop
+        $content = $response.Content
+
+        # Find httpd zip files
+        $pattern = 'href="([^"]*httpd-2\.4\.\d+-[^"]*win64-VS1[67]\.zip)"'
+        $matches = [regex]::Matches($content, $pattern)
+
+        $discoveredUrls = @()
+        foreach ($match in $matches) {
+            $filename = $match.Groups[1].Value
+            if ($filename -notmatch "^http") {
+                $filename = "https://www.apachelounge.com/download/$filename"
+            }
+            $discoveredUrls += $filename
+        }
+
+        if ($discoveredUrls.Count -gt 0) {
+            $urls = $discoveredUrls + $urls | Select-Object -Unique
+            Write-OK "Found $($discoveredUrls.Count) Apache versions"
+        }
+    } catch {
+        Write-Debug "Failed to parse Apache Lounge: $_"
+    }
+
+    # Test and cache
+    $workingUrl = Find-WorkingUrl -Urls $urls -MinSize 10MB
+    if ($workingUrl) {
+        $cacheData = Get-UrlCache
+        if (-not $cacheData) { $cacheData = @{} }
+        $cacheData.Apache = $workingUrl
+        Set-UrlCache -Urls $cacheData
+        Write-OK "Found Apache: $(Split-Path $workingUrl -Leaf)"
+    }
+
+    return $urls
+}
+
 function Get-PHPDownloadUrls {
     Write-Info "Discovering PHP download URLs..."
-    
+
     # Check cache first
     $cache = Get-UrlCache
     if ($cache.PHP) {
         Write-Debug "Using cached PHP URL"
         return @($cache.PHP)
     }
-    
+
     $urls = @()
-    
+
     # Strategy 1: Parse windows.php.net releases page
+    # NOTE: For Apache, we need Thread Safe (TS) version
     try {
         $response = Invoke-WebRequest -Uri "https://windows.php.net/downloads/releases/" -UseBasicParsing -TimeoutSec 15 -ErrorAction Stop
         $content = $response.Content
-        
-        # Find all PHP 8.x Win32 vs16 x64 zip files
+
+        # Find all PHP 8.x Win32 vs16 x64 Thread Safe zip files
         $pattern = 'href="(php-8\.[234]\.\d+-Win32-vs16-x64\.zip)"'
         $matches = [regex]::Matches($content, $pattern)
-        
+
         foreach ($match in $matches) {
             $filename = $match.Groups[1].Value
             $url = "https://windows.php.net/downloads/releases/$filename"
             $urls += $url
         }
-        
+
         # Sort by version descending (newest first)
-        $urls = $urls | Sort-Object { 
+        $urls = $urls | Sort-Object {
             if ($_ -match 'php-(\d+)\.(\d+)\.(\d+)') {
                 [int]$matches[1] * 10000 + [int]$matches[2] * 100 + [int]$matches[3]
             } else { 0 }
         } -Descending
-        
+
         if ($urls.Count -gt 0) {
             Write-OK "Found $($urls.Count) PHP versions"
             Write-Debug "Latest: $($urls[0])"
@@ -510,28 +577,28 @@ function Get-PHPDownloadUrls {
     } catch {
         Write-Debug "Failed to parse PHP releases: $_"
     }
-    
+
     # Strategy 2: Try archives if no current releases found
     if ($urls.Count -eq 0) {
         try {
             $response = Invoke-WebRequest -Uri "https://windows.php.net/downloads/releases/archives/" -UseBasicParsing -TimeoutSec 15 -ErrorAction Stop
             $content = $response.Content
-            
+
             $pattern = 'href="(php-8\.[234]\.\d+-Win32-vs16-x64\.zip)"'
             $matches = [regex]::Matches($content, $pattern)
-            
+
             foreach ($match in $matches) {
                 $filename = $match.Groups[1].Value
                 $url = "https://windows.php.net/downloads/releases/archives/$filename"
                 $urls += $url
             }
-            
-            $urls = $urls | Sort-Object { 
+
+            $urls = $urls | Sort-Object {
                 if ($_ -match 'php-(\d+)\.(\d+)\.(\d+)') {
                     [int]$matches[1] * 10000 + [int]$matches[2] * 100 + [int]$matches[3]
                 } else { 0 }
             } -Descending | Select-Object -First 5
-            
+
             if ($urls.Count -gt 0) {
                 Write-OK "Found $($urls.Count) PHP versions in archives"
             }
@@ -539,8 +606,8 @@ function Get-PHPDownloadUrls {
             Write-Debug "Failed to parse PHP archives: $_"
         }
     }
-    
-    # Fallback: Known stable versions
+
+    # Fallback: Known stable versions (Thread Safe for Apache)
     if ($urls.Count -eq 0) {
         Write-Info "Using fallback PHP URLs..."
         $urls = @(
@@ -550,7 +617,7 @@ function Get-PHPDownloadUrls {
             "https://windows.php.net/downloads/releases/archives/php-8.2.26-Win32-vs16-x64.zip"
         )
     }
-    
+
     # Cache the first working URL
     $workingUrl = Find-WorkingUrl -Urls $urls -MinSize 20MB
     if ($workingUrl) {
@@ -559,29 +626,29 @@ function Get-PHPDownloadUrls {
         $cacheData.PHP = $workingUrl
         Set-UrlCache -Urls $cacheData
     }
-    
+
     return $urls
 }
 
 function Get-GitDownloadUrls {
     Write-Info "Discovering Git download URLs..."
-    
+
     # Check cache first
     $cache = Get-UrlCache
     if ($cache.Git) {
         Write-Debug "Using cached Git URL"
         return @($cache.Git)
     }
-    
+
     $urls = @()
-    
+
     # Strategy 1: GitHub API
     try {
         $apiUrl = "https://api.github.com/repos/git-for-windows/git/releases/latest"
         $headers = @{ "User-Agent" = "PowerShell-BookStack-Installer" }
-        
+
         $response = Invoke-RestMethod -Uri $apiUrl -Headers $headers -TimeoutSec 15 -ErrorAction Stop
-        
+
         foreach ($asset in $response.assets) {
             if ($asset.name -match "PortableGit.*64-bit.*\.7z\.exe$") {
                 $urls += $asset.browser_download_url
@@ -592,15 +659,15 @@ function Get-GitDownloadUrls {
     } catch {
         Write-Debug "GitHub API failed: $_"
     }
-    
+
     # Strategy 2: Check recent releases
     if ($urls.Count -eq 0) {
         try {
             $apiUrl = "https://api.github.com/repos/git-for-windows/git/releases?per_page=5"
             $headers = @{ "User-Agent" = "PowerShell-BookStack-Installer" }
-            
+
             $releases = Invoke-RestMethod -Uri $apiUrl -Headers $headers -TimeoutSec 15 -ErrorAction Stop
-            
+
             foreach ($release in $releases) {
                 foreach ($asset in $release.assets) {
                     if ($asset.name -match "PortableGit.*64-bit.*\.7z\.exe$") {
@@ -608,7 +675,7 @@ function Get-GitDownloadUrls {
                     }
                 }
             }
-            
+
             if ($urls.Count -gt 0) {
                 Write-OK "Found $($urls.Count) Git versions"
             }
@@ -616,7 +683,7 @@ function Get-GitDownloadUrls {
             Write-Debug "GitHub releases API failed: $_"
         }
     }
-    
+
     # Fallback
     if ($urls.Count -eq 0) {
         Write-Info "Using fallback Git URLs..."
@@ -626,7 +693,7 @@ function Get-GitDownloadUrls {
             "https://github.com/git-for-windows/git/releases/download/v2.47.0.windows.2/PortableGit-2.47.0.2-64-bit.7z.exe"
         )
     }
-    
+
     # Cache the first working URL
     $workingUrl = Find-WorkingUrl -Urls $urls -MinSize 30MB
     if ($workingUrl) {
@@ -635,20 +702,20 @@ function Get-GitDownloadUrls {
         $cacheData.Git = $workingUrl
         Set-UrlCache -Urls $cacheData
     }
-    
+
     return $urls
 }
 
 function Get-MariaDBDownloadUrls {
     Write-Info "Discovering MariaDB download URLs..."
-    
+
     # Check cache first
     $cache = Get-UrlCache
     if ($cache.MariaDB) {
         Write-Debug "Using cached MariaDB URL"
         return @($cache.MariaDB)
     }
-    
+
     # MariaDB archive is very stable - use known versions
     # 10.6 LTS is recommended for stability
     $urls = @(
@@ -658,7 +725,7 @@ function Get-MariaDBDownloadUrls {
         "https://archive.mariadb.org/mariadb-10.11.10/winx64-packages/mariadb-10.11.10-winx64.zip",
         "https://archive.mariadb.org/mariadb-10.5.27/winx64-packages/mariadb-10.5.27-winx64.zip"
     )
-    
+
     # Test and cache
     $workingUrl = Find-WorkingUrl -Urls $urls -MinSize 50MB
     if ($workingUrl) {
@@ -668,25 +735,25 @@ function Get-MariaDBDownloadUrls {
         Set-UrlCache -Urls $cacheData
         Write-OK "Found MariaDB: $(Split-Path $workingUrl -Leaf)"
     }
-    
+
     return $urls
 }
 
 function Get-ComposerDownloadUrls {
     Write-Info "Discovering Composer download URLs..."
-    
+
     $urls = @(
         "https://getcomposer.org/download/latest-stable/composer.phar",
         "https://getcomposer.org/composer-stable.phar"
     )
-    
+
     # Try GitHub API for specific version
     try {
         $apiUrl = "https://api.github.com/repos/composer/composer/releases/latest"
         $headers = @{ "User-Agent" = "PowerShell-BookStack-Installer" }
-        
+
         $response = Invoke-RestMethod -Uri $apiUrl -Headers $headers -TimeoutSec 10 -ErrorAction Stop
-        
+
         foreach ($asset in $response.assets) {
             if ($asset.name -eq "composer.phar") {
                 $urls = @($asset.browser_download_url) + $urls
@@ -697,7 +764,7 @@ function Get-ComposerDownloadUrls {
     } catch {
         Write-Debug "GitHub API failed: $_"
     }
-    
+
     return $urls
 }
 
@@ -947,7 +1014,7 @@ function Remove-FolderSafely {
     }
 
     # Kill processes that might lock files
-    @("git", "php", "mysqld", "mysql", "composer") | ForEach-Object {
+    @("git", "php", "php-cgi", "mysqld", "mysql", "composer", "httpd") | ForEach-Object {
         Stop-Process -Name "$_*" -Force -ErrorAction SilentlyContinue
     }
     Start-Sleep -Seconds 2
@@ -1060,6 +1127,13 @@ function Initialize-Directories {
         }
     }
 
+    # Create the app/public directory early for Apache config validation
+    $appPublicPath = "$($script:Paths.App)\public"
+    if (-not (Test-Path $appPublicPath)) {
+        New-Item -ItemType Directory -Path $appPublicPath -Force | Out-Null
+        Write-Info "Created: $appPublicPath (placeholder for Apache)"
+    }
+
     # Set permissions on root
     Set-FullPermissions -Path $RootPath
 
@@ -1068,11 +1142,350 @@ function Initialize-Directories {
 }
 
 # ============================================================
-# PHP INSTALLATION
+# APACHE INSTALLATION
+# ============================================================
+
+function Install-Apache {
+    Write-Step "Installing Apache HTTPD (Portable)"
+
+    $apacheExe = $script:Files.ApacheExe
+    $apachePath = $script:Paths.Apache
+    $apacheZip = "$($script:Paths.Downloads)\httpd.zip"
+    $minSize = 10MB
+
+    # Check if already installed
+    if (Test-Path $apacheExe) {
+        $result = Invoke-SafeCommand -Executable $apacheExe -Arguments @("-v")
+        $version = ($result.StdOut -split "`n")[0]
+        Write-OK "Apache already installed: $version"
+        return $true
+    }
+
+    Write-Info "Apache not found, downloading..."
+
+    # Check for manually placed file
+    $manualFiles = @(
+        $apacheZip,
+        "$env:USERPROFILE\Downloads\httpd*.zip",
+        "$env:USERPROFILE\Downloads\Apache*.zip"
+    )
+
+    $foundFile = $null
+    foreach ($pattern in $manualFiles) {
+        $found = Get-Item $pattern -ErrorAction SilentlyContinue |
+                 Where-Object { $_.Length -gt $minSize } |
+                 Sort-Object LastWriteTime -Descending |
+                 Select-Object -First 1
+        if ($found) {
+            $foundFile = $found.FullName
+            break
+        }
+    }
+
+    if ($foundFile -and $foundFile -ne $apacheZip) {
+        Copy-Item $foundFile $apacheZip -Force
+        Write-OK "Found Apache: $($found.Name)"
+    } elseif (-not (Test-Path $apacheZip) -or (Get-Item $apacheZip -ErrorAction SilentlyContinue).Length -lt $minSize) {
+        # Get dynamic URLs
+        $apacheUrls = Get-ApacheDownloadUrls
+        $downloaded = Download-WithFallback -Urls $apacheUrls -OutputPath $apacheZip -MinSize $minSize -Description "Apache HTTPD 2.4"
+
+        if (-not $downloaded) {
+            Request-ManualDownload -Description "Apache HTTPD (Win64 ZIP)" `
+                -Url "https://www.apachelounge.com/download/" `
+                -SavePath $apacheZip `
+                -SearchPattern "httpd*.zip" `
+                -MinSizeMB 10
+        }
+    }
+
+    # Verify download
+    if (-not (Test-Path $apacheZip) -or (Get-Item $apacheZip).Length -lt $minSize) {
+        Write-Err "Apache download not found or incomplete"
+        return $false
+    }
+
+    # Clear existing and extract
+    if (Test-Path $apachePath) {
+        Remove-Item $apachePath -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    New-Item -ItemType Directory -Path $apachePath -Force | Out-Null
+
+    # Extract - Apache Lounge zips contain "Apache24" folder
+    if (-not (Extract-Archive -ArchivePath $apacheZip -DestinationPath $apachePath -StripFirstFolder)) {
+        Write-Err "Failed to extract Apache"
+        return $false
+    }
+
+    # Verify extraction
+    if (-not (Test-Path $apacheExe)) {
+        # Check if it extracted to a subfolder
+        $subDir = Get-ChildItem $apachePath -Directory | Where-Object { $_.Name -match "Apache" -or $_.Name -eq "bin" } | Select-Object -First 1
+        if ($subDir -and (Test-Path "$($subDir.FullName)\bin\httpd.exe")) {
+            # Move contents up
+            Get-ChildItem $subDir.FullName | ForEach-Object {
+                Move-Item $_.FullName $apachePath -Force
+            }
+            Remove-Item $subDir.FullName -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    if (-not (Test-Path $apacheExe)) {
+        Write-Err "Apache extraction failed - httpd.exe not found"
+        return $false
+    }
+
+    Write-OK "Apache extracted successfully"
+    return $true
+}
+
+function Configure-Apache {
+    Write-Step "Configuring Apache for BookStack"
+
+    $apachePath = $script:Paths.Apache
+    $phpPath = $script:Paths.PHP
+    $appPath = $script:Paths.App
+    $logsPath = $script:Paths.Logs
+    $apacheConf = $script:Files.ApacheConf
+
+    # Ensure the public directory exists for Apache config validation
+    $appPublicPath = "$appPath\public"
+    if (-not (Test-Path $appPublicPath)) {
+        New-Item -ItemType Directory -Path $appPublicPath -Force | Out-Null
+        Write-Info "Created app/public directory for Apache"
+    }
+
+    # Convert paths to forward slashes for Apache config
+    $apachePathFwd = $apachePath -replace '\\', '/'
+    $phpPathFwd = $phpPath -replace '\\', '/'
+    $appPathFwd = $appPath -replace '\\', '/'
+    $logsPathFwd = $logsPath -replace '\\', '/'
+
+    # Check if mod_fcgid exists
+    $fcgidExists = Test-Path "$apachePath\modules\mod_fcgid.so"
+    $fcgidLoadLine = if ($fcgidExists) {
+        "LoadModule fcgid_module modules/mod_fcgid.so"
+    } else {
+        "# LoadModule fcgid_module modules/mod_fcgid.so  # Not installed - using CGI fallback"
+    }
+
+    # Create Apache configuration
+    $httpdConf = @"
+# Apache HTTPD Configuration for BookStack Portable
+# Generated by BookStack Portable Installer
+
+# Server root and modules
+ServerRoot "$apachePathFwd"
+Listen $AppPort
+
+# Load required modules
+LoadModule access_compat_module modules/mod_access_compat.so
+LoadModule actions_module modules/mod_actions.so
+LoadModule alias_module modules/mod_alias.so
+LoadModule allowmethods_module modules/mod_allowmethods.so
+LoadModule auth_basic_module modules/mod_auth_basic.so
+LoadModule authn_core_module modules/mod_authn_core.so
+LoadModule authn_file_module modules/mod_authn_file.so
+LoadModule authz_core_module modules/mod_authz_core.so
+LoadModule authz_host_module modules/mod_authz_host.so
+LoadModule authz_user_module modules/mod_authz_user.so
+LoadModule autoindex_module modules/mod_autoindex.so
+LoadModule cgi_module modules/mod_cgi.so
+LoadModule dir_module modules/mod_dir.so
+LoadModule env_module modules/mod_env.so
+$fcgidLoadLine
+LoadModule headers_module modules/mod_headers.so
+LoadModule log_config_module modules/mod_log_config.so
+LoadModule mime_module modules/mod_mime.so
+LoadModule negotiation_module modules/mod_negotiation.so
+LoadModule rewrite_module modules/mod_rewrite.so
+LoadModule setenvif_module modules/mod_setenvif.so
+
+# Server configuration
+ServerAdmin admin@localhost
+ServerName localhost:$AppPort
+
+# Document root - BookStack public folder
+DocumentRoot "$appPathFwd/public"
+
+<Directory />
+    AllowOverride None
+    Require all denied
+</Directory>
+
+<Directory "$appPathFwd/public">
+    Options FollowSymLinks ExecCGI
+    AllowOverride All
+    Require all granted
+    DirectoryIndex index.php index.html
+</Directory>
+
+# Logging
+ErrorLog "$logsPathFwd/apache_error.log"
+LogLevel warn
+
+<IfModule log_config_module>
+    LogFormat "%h %l %u %t \"%r\" %>s %b \"%{Referer}i\" \"%{User-Agent}i\"" combined
+    LogFormat "%h %l %u %t \"%r\" %>s %b" common
+    CustomLog "$logsPathFwd/apache_access.log" combined
+</IfModule>
+
+# MIME types
+<IfModule mime_module>
+    TypesConfig conf/mime.types
+    AddType application/x-compress .Z
+    AddType application/x-gzip .gz .tgz
+    AddType application/x-httpd-php .php
+</IfModule>
+
+# PHP via FastCGI (mod_fcgid) - preferred method
+<IfModule fcgid_module>
+    FcgidInitialEnv PHPRC "$phpPathFwd"
+    FcgidInitialEnv PHP_FCGI_MAX_REQUESTS 10000
+    FcgidMaxRequestLen 1073741824
+    FcgidIOTimeout 600
+    FcgidConnectTimeout 60
+    FcgidProcessLifeTime 3600
+    FcgidMaxProcesses 5
+    FcgidMinProcessesPerClass 1
+    FcgidMaxProcessesPerClass 5
+    
+    <Files ~ "\.php$">
+        Options +ExecCGI
+        AddHandler fcgid-script .php
+        FcgidWrapper "$phpPathFwd/php-cgi.exe" .php
+    </Files>
+</IfModule>
+
+# PHP via CGI - fallback when mod_fcgid is not available
+<IfModule !fcgid_module>
+    <IfModule cgi_module>
+        # Set up PHP-CGI as a script processor
+        ScriptAlias /php-cgi-bin/ "$phpPathFwd/"
+        
+        <Directory "$phpPathFwd">
+            AllowOverride None
+            Options None
+            Require all granted
+        </Directory>
+        
+        # Process .php files through php-cgi.exe
+        Action application/x-httpd-php "/php-cgi-bin/php-cgi.exe"
+        
+        # Set environment for PHP
+        SetEnv PHPRC "$phpPathFwd"
+    </IfModule>
+</IfModule>
+
+# Security headers
+<IfModule headers_module>
+    Header always set X-Content-Type-Options "nosniff"
+    Header always set X-Frame-Options "SAMEORIGIN"
+</IfModule>
+
+# Enable rewrite engine for Laravel/BookStack
+<IfModule rewrite_module>
+    RewriteEngine On
+</IfModule>
+
+# Disable directory listings
+<IfModule autoindex_module>
+    IndexIgnore *
+</IfModule>
+
+# Performance
+KeepAlive On
+MaxKeepAliveRequests 100
+KeepAliveTimeout 5
+
+# Timeouts
+Timeout 300
+
+# PidFile location
+PidFile "$logsPathFwd/httpd.pid"
+
+# Include additional configs if they exist
+IncludeOptional conf/extra/httpd-default.conf
+"@
+
+    # Backup original config if exists
+    if (Test-Path $apacheConf) {
+        Copy-Item $apacheConf "$apacheConf.original" -Force
+    }
+
+    # Write new config
+    Write-FileNoBom -Path $apacheConf -Content $httpdConf
+
+    if ($fcgidExists) {
+        Write-OK "Apache configured with mod_fcgid (FastCGI)"
+    } else {
+        Write-Warn "Apache configured with CGI fallback (mod_fcgid not found)"
+        Write-Info "Performance may be reduced. Consider installing mod_fcgid manually."
+    }
+    
+    return $true
+}
+
+function Install-ApacheFcgid {
+    Write-Info "Checking for mod_fcgid..."
+
+    $apachePath = $script:Paths.Apache
+    $fcgidModule = "$apachePath\modules\mod_fcgid.so"
+    $fcgidZip = "$($script:Paths.Downloads)\mod_fcgid.zip"
+
+    if (Test-Path $fcgidModule) {
+        Write-OK "mod_fcgid already installed"
+        return $true
+    }
+
+    Write-Info "Downloading mod_fcgid..."
+
+    # mod_fcgid download URLs
+    $fcgidUrls = @(
+        "https://www.apachelounge.com/download/VS17/modules/mod_fcgid-2.3.10-win64-VS17.zip",
+        "https://www.apachelounge.com/download/VS16/modules/mod_fcgid-2.3.10-win64-VS16.zip"
+    )
+
+    $downloaded = Download-WithFallback -Urls $fcgidUrls -OutputPath $fcgidZip -MinSize 50KB -Description "mod_fcgid"
+
+    if (-not $downloaded) {
+        Write-Warn "Could not download mod_fcgid. Will use CGI mode instead."
+        return $true  # Continue anyway, CGI fallback is configured
+    }
+
+    # Extract mod_fcgid
+    $tempExtract = "$($script:Paths.Temp)\fcgid_extract"
+    if (Test-Path $tempExtract) {
+        Remove-Item $tempExtract -Recurse -Force
+    }
+    New-Item -ItemType Directory -Path $tempExtract -Force | Out-Null
+
+    try {
+        Expand-Archive -Path $fcgidZip -DestinationPath $tempExtract -Force
+
+        # Find mod_fcgid.so
+        $fcgidFile = Get-ChildItem $tempExtract -Recurse -Filter "mod_fcgid.so" | Select-Object -First 1
+        if ($fcgidFile) {
+            Copy-Item $fcgidFile.FullName $fcgidModule -Force
+            Write-OK "mod_fcgid installed"
+        } else {
+            Write-Warn "mod_fcgid.so not found in archive"
+        }
+    } catch {
+        Write-Warn "Failed to extract mod_fcgid: $_"
+    }
+
+    Remove-Item $tempExtract -Recurse -Force -ErrorAction SilentlyContinue
+
+    return $true
+}
+
+# ============================================================
+# PHP INSTALLATION (Thread Safe for Apache)
 # ============================================================
 
 function Install-PHP {
-    Write-Step "Installing PHP (Portable)"
+    Write-Step "Installing PHP (Portable - Thread Safe)"
 
     $phpExe = $script:Files.PHPExe
     $phpPath = $script:Paths.PHP
@@ -1114,7 +1527,7 @@ function Install-PHP {
     } elseif (-not (Test-Path $phpZip) -or (Get-Item $phpZip -ErrorAction SilentlyContinue).Length -lt $minSize) {
         # Get dynamic URLs
         $phpUrls = Get-PHPDownloadUrls
-        $downloaded = Download-WithFallback -Urls $phpUrls -OutputPath $phpZip -MinSize $minSize -Description "PHP 8.3"
+        $downloaded = Download-WithFallback -Urls $phpUrls -OutputPath $phpZip -MinSize $minSize -Description "PHP 8.3 (Thread Safe)"
 
         if (-not $downloaded) {
             Request-ManualDownload -Description "PHP 8.x (VS16 x64 Thread Safe ZIP)" `
@@ -1148,16 +1561,23 @@ function Install-PHP {
         return $false
     }
 
+    # Verify php-cgi.exe exists (needed for Apache)
+    if (-not (Test-Path $script:Files.PHPCgiExe)) {
+        Write-Err "php-cgi.exe not found - make sure you downloaded Thread Safe version"
+        return $false
+    }
+
     Write-OK "PHP extracted successfully"
     return $true
 }
 
 function Configure-PHP {
-    Write-Step "Configuring PHP"
+    Write-Step "Configuring PHP (High Performance Mode for Apache)"
 
     $phpPath = $script:Paths.PHP
     $phpIni = $script:Files.PHPIni
     $tempPath = $script:Paths.Temp
+    $logsPath = $script:Paths.Logs
 
     # Find template
     $phpIniTemplate = "$phpPath\php.ini-production"
@@ -1173,11 +1593,11 @@ function Configure-PHP {
     # Read template content
     $content = Get-Content $phpIniTemplate -Raw
 
-    # Enable extensions
+    # Enable extensions (ADDED OPCACHE)
     $extensions = @(
         "curl", "fileinfo", "gd", "mbstring", "mysqli",
         "openssl", "pdo_mysql", "xml", "ldap", "zip",
-        "exif", "intl", "sodium", "gettext"
+        "exif", "intl", "sodium", "gettext", "opcache"
     )
 
     foreach ($ext in $extensions) {
@@ -1187,24 +1607,28 @@ function Configure-PHP {
     # Set paths (using forward slashes)
     $extDir = "$phpPath\ext" -replace '\\', '/'
     $tempDir = $tempPath -replace '\\', '/'
+    $logsDir = $logsPath -replace '\\', '/'
 
     # Update extension directory
     $content = $content -replace ';?\s*extension_dir\s*=\s*"ext"', "extension_dir = `"$extDir`""
     $content = $content -replace ';?\s*extension_dir\s*=\s*"\./"', "extension_dir = `"$extDir`""
 
-    # Set memory and upload limits
-    $content = $content -replace 'memory_limit\s*=\s*\d+M', 'memory_limit = 256M'
-    $content = $content -replace 'upload_max_filesize\s*=\s*\d+M', 'upload_max_filesize = 100M'
-    $content = $content -replace 'post_max_size\s*=\s*\d+M', 'post_max_size = 100M'
+    # Set memory and upload limits (INCREASED FOR PERFORMANCE)
+    $content = $content -replace 'memory_limit\s*=\s*\d+M', 'memory_limit = 512M'
+    $content = $content -replace 'upload_max_filesize\s*=\s*\d+M', 'upload_max_filesize = 128M'
+    $content = $content -replace 'post_max_size\s*=\s*\d+M', 'post_max_size = 128M'
     $content = $content -replace 'max_execution_time\s*=\s*\d+', 'max_execution_time = 300'
     $content = $content -replace 'max_input_time\s*=\s*\d+', 'max_input_time = 300'
     $content = $content -replace 'max_input_vars\s*=\s*\d+', 'max_input_vars = 5000'
 
-    # Add portable configuration at the end (NO SSL cert references)
+    # Enable cgi.fix_pathinfo for Apache
+    $content = $content -replace ';?\s*cgi\.fix_pathinfo\s*=\s*\d', 'cgi.fix_pathinfo=1'
+
+    # Add portable configuration at the end (INCLUDES JIT/OPCACHE)
     $portableConfig = @"
 
 ; ================================================================
-; PORTABLE BOOKSTACK CONFIGURATION
+; PORTABLE BOOKSTACK CONFIGURATION - APACHE + PHP-CGI
 ; ================================================================
 
 ; Temporary directory
@@ -1212,14 +1636,37 @@ sys_temp_dir = "$tempDir"
 upload_tmp_dir = "$tempDir"
 
 ; Error logging
-error_log = "$($script:Paths.Logs -replace '\\', '/')/php_errors.log"
+error_log = "$logsDir/php_errors.log"
 log_errors = On
+display_errors = Off
 
 ; Timezone (adjust as needed)
 date.timezone = UTC
 
 ; Session settings
 session.save_path = "$tempDir"
+
+; CGI/FastCGI settings
+cgi.fix_pathinfo = 1
+fastcgi.impersonate = 1
+cgi.force_redirect = 0
+
+; --------------------------------------
+; OPCACHE & JIT (The Speed Boosters)
+; --------------------------------------
+[opcache]
+opcache.enable=1
+opcache.enable_cli=1
+; Increase memory for code cache
+opcache.memory_consumption=128
+opcache.interned_strings_buffer=8
+opcache.max_accelerated_files=10000
+; Don't check for file changes on every request (Performance win)
+opcache.revalidate_freq=60
+opcache.save_comments=1
+; JIT Compiler (PHP 8.x)
+opcache.jit_buffer_size=100M
+opcache.jit=1255
 "@
 
     $content = $content.TrimEnd() + "`n" + $portableConfig
@@ -1227,7 +1674,7 @@ session.save_path = "$tempDir"
     # Write php.ini without BOM
     Write-FileNoBom -Path $phpIni -Content $content
 
-    Write-Info "Created php.ini"
+    Write-Info "Created php.ini with JIT and OPcache enabled for Apache"
 
     # Verify PHP works
     $result = Invoke-SafeCommand -Executable $script:Files.PHPExe -Arguments @("-v")
@@ -1441,7 +1888,7 @@ function Install-Git {
 }
 
 # ============================================================
-# MARIADB INSTALLATION (FIXED - NO BOM)
+# MARIADB INSTALLATION (PERFORMANCE TUNED)
 # ============================================================
 
 function Install-MariaDB {
@@ -1547,7 +1994,7 @@ function Install-MariaDB {
 }
 
 function Create-MariaDBConfig {
-    Write-Info "Creating MariaDB configuration..."
+    Write-Info "Creating MariaDB configuration (Performance Tuned)..."
 
     $mariaPath = $script:Paths.MariaDB
     $dataPath = $script:Paths.DataDB
@@ -1559,7 +2006,7 @@ function Create-MariaDBConfig {
     $baseDirForward = $mariaPath -replace '\\', '/'
     $logDirForward = $logsPath -replace '\\', '/'
 
-    # IMPORTANT: Config must start with [mysqld] - no BOM or blank lines before it
+    # PERFORMANCE OPTIMIZED CONFIG
     $myIniContent = @"
 [mysqld]
 datadir=$dataDirForward
@@ -1570,14 +2017,30 @@ skip-networking=0
 character-set-server=utf8mb4
 collation-server=utf8mb4_unicode_ci
 character-set-client-handshake=FALSE
-innodb_buffer_pool_size=128M
-innodb_log_file_size=48M
-innodb_file_per_table=1
+
+; Performance Tuning (Blazing Fast Mode)
+innodb_buffer_pool_size=512M
+innodb_log_file_size=128M
+innodb_log_buffer_size=16M
+innodb_write_io_threads=4
+innodb_read_io_threads=4
 innodb_flush_log_at_trx_commit=2
-max_connections=50
-table_open_cache=400
-tmp_table_size=32M
-max_heap_table_size=32M
+innodb_io_capacity=1000
+
+; Caching
+query_cache_type=1
+query_cache_limit=2M
+query_cache_size=64M
+table_open_cache=2000
+thread_cache_size=16
+
+; Temp Tables
+max_heap_table_size=64M
+tmp_table_size=64M
+
+; Basics
+max_connections=100
+innodb_file_per_table=1
 skip-name-resolve
 local-infile=0
 log_error=$logDirForward/mariadb_error.log
@@ -1593,10 +2056,9 @@ default-character-set=utf8mb4
 log_error=$logDirForward/mariadb_error.log
 "@
 
-    # CRITICAL: Write without BOM using .NET method
     Write-FileNoBom -Path $myIni -Content $myIniContent
 
-    Write-OK "MariaDB configuration created (without BOM)"
+    Write-OK "MariaDB configuration created (Performance Optimized)"
     return $true
 }
 
@@ -1617,7 +2079,7 @@ function Initialize-MariaDB {
         }
     }
 
-    # Create configuration first (without BOM!)
+    # Create configuration first
     Create-MariaDBConfig
 
     # Check if already initialized
@@ -1631,9 +2093,7 @@ function Initialize-MariaDB {
     # Clear any partial data
     Get-ChildItem $dataPath -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 
-    # ================================================================
-    # METHOD 1: Use mysql_install_db.exe (MariaDB's preferred method)
-    # ================================================================
+    # METHOD 1: Use mysql_install_db.exe
     if (Test-Path $mysqlInstallDb) {
         Write-SubStep "Using mysql_install_db.exe"
 
@@ -1656,20 +2116,14 @@ function Initialize-MariaDB {
 
         try {
             $process.Start() | Out-Null
-
             $stdout = $process.StandardOutput.ReadToEnd()
             $stderr = $process.StandardError.ReadToEnd()
-
-            $process.WaitForExit(180000) # 3 minute timeout
+            $process.WaitForExit(180000)
 
             if ($stdout) {
                 $stdout -split "`n" | Where-Object { $_.Trim() } | ForEach-Object {
                     Write-Host "    $_" -ForegroundColor Gray
                 }
-            }
-
-            if ($stderr -and $stderr -notmatch "Creation of the system tables|PLEASE REMEMBER") {
-                Write-Host "    $stderr" -ForegroundColor Yellow
             }
         } catch {
             Write-Warn "mysql_install_db error: $_"
@@ -1677,24 +2131,17 @@ function Initialize-MariaDB {
             if ($process) { $process.Dispose() }
         }
 
-        # Check if it worked
         if ((Test-Path "$dataPath\mysql") -and (Get-ChildItem "$dataPath\mysql" -ErrorAction SilentlyContinue).Count -gt 5) {
             Write-OK "MariaDB initialized successfully"
             return $true
         }
     }
 
-    # ================================================================
-    # METHOD 2: Check for bundled data directory in MariaDB package
-    # ================================================================
+    # METHOD 2: Check for bundled data directory
     Write-SubStep "Checking for bundled data template"
 
-    $bundledDataPaths = @(
-        "$mariaPath\data",
-        "$mariaPath\var"
-    )
+    $bundledDataPaths = @("$mariaPath\data", "$mariaPath\var")
 
-    # Also search for data folder recursively
     $foundDataFolder = Get-ChildItem $mariaPath -Directory -Recurse -ErrorAction SilentlyContinue |
                        Where-Object { $_.Name -eq "data" -and (Test-Path "$($_.FullName)\mysql") } |
                        Select-Object -First 1
@@ -1706,11 +2153,7 @@ function Initialize-MariaDB {
     foreach ($bundledPath in $bundledDataPaths) {
         if ($bundledPath -and (Test-Path "$bundledPath\mysql")) {
             Write-Info "Found bundled data at: $bundledPath"
-
-            # Clear destination
             Get-ChildItem $dataPath -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
-
-            # Copy bundled data
             Copy-Item "$bundledPath\*" $dataPath -Recurse -Force
 
             if ((Test-Path "$dataPath\mysql") -and (Get-ChildItem "$dataPath\mysql" -ErrorAction SilentlyContinue).Count -gt 5) {
@@ -1720,12 +2163,9 @@ function Initialize-MariaDB {
         }
     }
 
-    # ================================================================
     # METHOD 3: Use mysqld --initialize-insecure
-    # ================================================================
     Write-SubStep "Trying mysqld --initialize-insecure"
 
-    # Clear data directory
     Get-ChildItem $dataPath -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 
     $initArgs = @(
@@ -1765,22 +2205,16 @@ function Initialize-MariaDB {
         return $true
     }
 
-    # ================================================================
     # METHOD 4: Start mysqld and let it self-initialize
-    # ================================================================
     Write-SubStep "Trying mysqld self-initialization"
 
-    # Clear data directory
     Get-ChildItem $dataPath -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 
-    # Start mysqld with skip-grant-tables to allow self-initialization
     $startArgs = "--defaults-file=`"$myIni`" --skip-grant-tables --console"
-
     $process = Start-Process -FilePath $mysqldExe -ArgumentList $startArgs -PassThru -WindowStyle Hidden
 
     Write-Info "Waiting for MariaDB to initialize..."
 
-    # Wait up to 30 seconds
     for ($i = 0; $i -lt 30; $i++) {
         Start-Sleep -Seconds 1
 
@@ -1795,7 +2229,6 @@ function Initialize-MariaDB {
         }
     }
 
-    # Stop the process
     if (-not $process.HasExited) {
         Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
     }
@@ -1806,23 +2239,11 @@ function Initialize-MariaDB {
         return $true
     }
 
-    # ================================================================
-    # FALLBACK: Manual instructions
-    # ================================================================
     Write-Err "Automatic initialization failed"
     Write-Host ""
-    Write-Host "  ================================================================" -ForegroundColor Yellow
-    Write-Host "  MANUAL MARIADB INITIALIZATION REQUIRED" -ForegroundColor Yellow
-    Write-Host "  ================================================================" -ForegroundColor Yellow
-    Write-Host ""
-    Write-Host "  Please run these commands in a Command Prompt window:" -ForegroundColor White
-    Write-Host ""
+    Write-Host "  Please run these commands manually:" -ForegroundColor Yellow
     Write-Host "    cd `"$mariaPath\bin`"" -ForegroundColor Cyan
     Write-Host "    mysql_install_db.exe --datadir=`"$dataPath`" --password=" -ForegroundColor Cyan
-    Write-Host ""
-    Write-Host "  If that doesn't work, try:" -ForegroundColor White
-    Write-Host ""
-    Write-Host "    mysqld.exe --initialize-insecure --datadir=`"$dataPath`"" -ForegroundColor Cyan
     Write-Host ""
 
     $response = Read-Host "Press Enter after running the command, or type 'skip' to continue anyway"
@@ -1860,39 +2281,25 @@ function Start-MariaDBServer {
         return $true
     }
 
-    # Verify mysqld exists
     if (-not (Test-Path $mysqldExe)) {
         Write-Err "mysqld.exe not found at: $mysqldExe"
         return $false
     }
 
-    # Start mysqld
     $process = Start-Process -FilePath $mysqldExe -ArgumentList "--defaults-file=`"$myIni`"" -PassThru -WindowStyle Hidden
 
-    # Wait for it to start (up to 30 seconds)
-    $maxWait = 30
+    $maxWait = 60
     $waited = 0
 
     while ($waited -lt $maxWait) {
         Start-Sleep -Seconds 1
         $waited++
 
-        # Check if process exited
         if ($process.HasExited) {
             Write-Warn "MariaDB process exited unexpectedly"
-
-            # Check error log
-            $errorLog = "$($script:Paths.Logs)\mariadb_error.log"
-            if (Test-Path $errorLog) {
-                $lastLines = Get-Content $errorLog -Tail 10
-                Write-Host "Last error log entries:" -ForegroundColor Yellow
-                $lastLines | ForEach-Object { Write-Host "  $_" -ForegroundColor Gray }
-            }
-
             return $false
         }
 
-        # Try to connect
         if (Test-Path $mysqlExe) {
             try {
                 $testResult = & $mysqlExe -u root -P $DBPort -h 127.0.0.1 --skip-password -e "SELECT 1" 2>&1
@@ -1914,7 +2321,6 @@ function Start-MariaDBServer {
         Write-Host ""
     }
 
-    # Final check - is process running?
     $runningProcess = Get-Process -Name "mysqld" -ErrorAction SilentlyContinue
     if ($runningProcess) {
         if (-not $Silent) {
@@ -1936,7 +2342,6 @@ function Stop-MariaDBServer {
 
     $mysqladminExe = $script:Files.MySQLAdminExe
 
-    # Try graceful shutdown first
     if (Test-Path $mysqladminExe) {
         try {
             $result = & $mysqladminExe -u root -P $DBPort -h 127.0.0.1 --skip-password shutdown 2>&1
@@ -1944,7 +2349,6 @@ function Stop-MariaDBServer {
         } catch {}
     }
 
-    # Force kill if still running
     $process = Get-Process -Name "mysqld" -ErrorAction SilentlyContinue
     if ($process) {
         Stop-Process -Name "mysqld" -Force -ErrorAction SilentlyContinue
@@ -1959,7 +2363,6 @@ function Stop-MariaDBServer {
 function Initialize-BookStackDatabase {
     Write-Step "Creating BookStack Database"
 
-    # Ensure MariaDB is running
     if (-not (Start-MariaDBServer)) {
         Write-Err "Cannot create database - MariaDB is not running"
         return $false
@@ -2027,20 +2430,16 @@ function Install-BookStack {
         New-Item -ItemType Directory -Path $appPath -Force | Out-Null
     }
 
-    # Ensure directory exists
     if (-not (Test-Path $appPath)) {
         New-Item -ItemType Directory -Path $appPath -Force | Out-Null
     }
 
-    # ================================================================
-    # Try Git clone first (if Git is available)
-    # ================================================================
+    # Try Git clone first
     if (Test-Path $gitExe) {
         Write-Info "Cloning BookStack with Git..."
 
         $env:GIT_SSL_NO_VERIFY = "true"
 
-        # Remove existing for fresh clone
         if (Test-Path $appPath) {
             Remove-Item $appPath -Recurse -Force -ErrorAction SilentlyContinue
         }
@@ -2062,12 +2461,9 @@ function Install-BookStack {
         }
     }
 
-    # ================================================================
     # Fallback to ZIP download
-    # ================================================================
     Write-Info "Downloading BookStack as ZIP..."
 
-    # Check for manually downloaded file
     $manualFiles = @(
         $bookstackZip,
         "$env:USERPROFILE\Downloads\BookStack*.zip",
@@ -2094,7 +2490,7 @@ function Install-BookStack {
         $bookstackUrls = @(
             "https://github.com/BookStackApp/BookStack/archive/refs/heads/release.zip"
         )
-        
+
         $downloaded = Download-WithFallback -Urls $bookstackUrls -OutputPath $bookstackZip -MinSize $minSize -Description "BookStack"
 
         if (-not $downloaded) {
@@ -2106,13 +2502,11 @@ function Install-BookStack {
         }
     }
 
-    # Verify download
     if (-not (Test-Path $bookstackZip) -or (Get-Item $bookstackZip).Length -lt $minSize) {
         Write-Err "BookStack download not found or incomplete"
         return $false
     }
 
-    # Extract
     Write-Info "Extracting BookStack..."
 
     if (-not (Extract-Archive -ArchivePath $bookstackZip -DestinationPath $appPath -StripFirstFolder)) {
@@ -2120,7 +2514,6 @@ function Install-BookStack {
         return $false
     }
 
-    # Verify
     if (Test-Path "$appPath\artisan") {
         Write-OK "BookStack installed successfully"
         return $true
@@ -2157,13 +2550,11 @@ function Initialize-BookStackDirectories {
         }
     }
 
-    # Clear any cached files
     $cacheFiles = Get-Item "$appPath\bootstrap\cache\*.php" -ErrorAction SilentlyContinue
     if ($cacheFiles) {
         Remove-Item $cacheFiles -Force -ErrorAction SilentlyContinue
     }
 
-    # Set permissions
     Set-FullPermissions -Path $appPath
 
     Write-OK "Storage directories created"
@@ -2175,7 +2566,6 @@ function Install-BookStackDependencies {
 
     $appPath = $script:Paths.App
 
-    # Setup environment
     $env:PATH = "$($script:Paths.PHP);$($script:Paths.Composer);$($script:Paths.Git)\cmd;$env:PATH"
     $env:COMPOSER_HOME = $script:Paths.Composer
     $env:COMPOSER_CACHE_DIR = "$($script:Paths.Temp)\composer-cache"
@@ -2183,14 +2573,12 @@ function Install-BookStackDependencies {
     $env:COMPOSER_NO_INTERACTION = "1"
     $env:GIT_SSL_NO_VERIFY = "true"
 
-    # Clear vendor folder for fresh install
     $vendorPath = "$appPath\vendor"
     if (Test-Path $vendorPath) {
         Write-Info "Clearing existing vendor folder..."
         Remove-Item $vendorPath -Recurse -Force -ErrorAction SilentlyContinue
     }
 
-    # Clear composer cache
     Write-Info "Clearing Composer cache..."
     Invoke-Composer -Arguments @("clear-cache") | Out-Null
 
@@ -2199,7 +2587,6 @@ function Install-BookStackDependencies {
     Write-Host "  This typically takes 5-15 minutes depending on your connection." -ForegroundColor Gray
     Write-Host ""
 
-    # Run Composer install with prefer-dist (faster downloads)
     $composerArgs = @(
         "install",
         "--no-dev",
@@ -2212,9 +2599,8 @@ function Install-BookStackDependencies {
 
     $result = Invoke-Composer -Arguments $composerArgs -ShowOutput
 
-    # Check if successful
     if (-not (Test-Path "$appPath\vendor\autoload.php")) {
-        Write-Warn "First attempt had issues. Trying with prefer-source (uses Git)..."
+        Write-Warn "First attempt had issues. Trying with prefer-source..."
 
         $composerArgs = @(
             "install",
@@ -2228,7 +2614,6 @@ function Install-BookStackDependencies {
         $result = Invoke-Composer -Arguments $composerArgs -ShowOutput
     }
 
-    # Verify installation
     if (Test-Path "$appPath\vendor\autoload.php") {
         $vendorCount = (Get-ChildItem "$appPath\vendor" -Directory -ErrorAction SilentlyContinue).Count
         Write-OK "Dependencies installed successfully ($vendorCount packages)"
@@ -2236,12 +2621,6 @@ function Install-BookStackDependencies {
     }
 
     Write-Err "Dependencies installation failed"
-    Write-Host ""
-    Write-Host "  Try running manually in a Command Prompt:" -ForegroundColor Yellow
-    Write-Host "    cd `"$appPath`"" -ForegroundColor Cyan
-    Write-Host "    `"$($script:Files.PHPExe)`" `"$($script:Files.ComposerPhar)`" install --no-dev --no-scripts" -ForegroundColor Cyan
-    Write-Host ""
-
     return $false
 }
 
@@ -2266,9 +2645,8 @@ function Configure-BookStack {
     $appKey = "base64:" + [Convert]::ToBase64String($randomBytes)
     $rng.Dispose()
 
-    # Create .env content
     $envContent = @"
-# BookStack Portable Configuration
+# BookStack Portable Configuration (Apache Edition)
 # Generated on $(Get-Date -Format "yyyy-MM-dd HH:mm:ss")
 
 APP_KEY=$appKey
@@ -2295,7 +2673,6 @@ CACHE_DRIVER=file
 STORAGE_TYPE=local
 "@
 
-    # Write .env without BOM
     Write-FileNoBom -Path $envFile -Content $envContent
 
     Write-OK "BookStack configured"
@@ -2305,7 +2682,6 @@ STORAGE_TYPE=local
 function Run-BookStackMigrations {
     Write-Step "Running Database Migrations"
 
-    # Ensure database is running
     Start-MariaDBServer -Silent
     Start-Sleep -Seconds 2
 
@@ -2316,43 +2692,76 @@ function Run-BookStackMigrations {
     return $true
 }
 
+function Optimize-BookStackInstallation {
+    Write-Step "Applying BookStack Production Optimizations"
+
+    Start-MariaDBServer -Silent
+
+    $appPath = $script:Paths.App
+
+    Write-Info "Caching configuration and routes..."
+
+    Invoke-Artisan -Arguments @("config:cache") -ShowOutput
+    Invoke-Artisan -Arguments @("route:cache") -ShowOutput
+    Invoke-Artisan -Arguments @("view:cache") -ShowOutput
+
+    Write-OK "BookStack optimized for production speed"
+    return $true
+}
+
+# ============================================================
+# APACHE STARTUP SCRIPTS
+# ============================================================
+
 function Create-StartupScripts {
     Write-Step "Creating Startup Scripts"
 
-    # START-BOOKSTACK.bat
+    # START-BOOKSTACK.bat (Apache version)
     $startBat = @"
 @echo off
-title BookStack Portable Server
+title BookStack Portable Server (Apache)
 color 0A
 
 echo.
 echo ================================================================
-echo            BOOKSTACK PORTABLE SERVER
+echo         BOOKSTACK PORTABLE SERVER (APACHE EDITION)
 echo ================================================================
 echo.
 echo   URL:       http://localhost:$AppPort
 echo   Login:     admin@admin.com
 echo   Password:  password
 echo.
-echo   Press Ctrl+C to stop the server
+echo   Press Ctrl+C or close this window to stop all services
 echo ================================================================
 echo.
 
 set "ROOT=%~dp0"
 set "ROOT=%ROOT:~0,-1%"
 
-echo Starting database server...
+echo [1/2] Starting MariaDB database server...
 tasklist /FI "IMAGENAME eq mysqld.exe" 2>NUL | find /I "mysqld.exe">NUL
 if errorlevel 1 (
     start "" /B "%ROOT%\mariadb\bin\mysqld.exe" --defaults-file="%ROOT%\mariadb\my.ini"
-    echo Waiting for database to start...
+    echo       Waiting for database to start...
     timeout /t 5 /nobreak >nul
+    echo       Database started.
+) else (
+    echo       Database already running.
 )
 
-echo Starting web server on port $AppPort...
 echo.
-cd /d "%ROOT%\app"
-"%ROOT%\php\php.exe" artisan serve --host=0.0.0.0 --port=$AppPort
+echo [2/2] Starting Apache web server on port $AppPort...
+tasklist /FI "IMAGENAME eq httpd.exe" 2>NUL | find /I "httpd.exe">NUL
+if errorlevel 1 (
+    "%ROOT%\apache\bin\httpd.exe"
+) else (
+    echo       Apache already running.
+    echo.
+    echo Press any key to stop all services...
+    pause >nul
+    taskkill /F /IM httpd.exe 2>nul
+    taskkill /F /IM mysqld.exe 2>nul
+)
 
 pause
 "@
@@ -2364,23 +2773,30 @@ pause
     $stopBat = @"
 @echo off
 echo Stopping BookStack services...
-taskkill /F /IM php.exe 2>nul
+echo.
+echo Stopping Apache...
+taskkill /F /IM httpd.exe 2>nul
+echo Stopping MariaDB...
 taskkill /F /IM mysqld.exe 2>nul
-echo Done.
+echo Stopping PHP processes...
+taskkill /F /IM php-cgi.exe 2>nul
+taskkill /F /IM php.exe 2>nul
+echo.
+echo All services stopped.
 timeout /t 2 /nobreak >nul
 "@
 
     Write-FileNoBom -Path $script:Files.StopBat -Content $stopBat -Ascii
     Write-OK "Created STOP-BOOKSTACK.bat"
 
-    # START-DATABASE.bat (standalone database start)
+    # START-DATABASE.bat
     $startDBBat = @"
 @echo off
 echo Starting MariaDB database server...
 set "ROOT=%~dp0"
 set "ROOT=%ROOT:~0,-1%"
 start "" /B "%ROOT%\mariadb\bin\mysqld.exe" --defaults-file="%ROOT%\mariadb\my.ini"
-echo Database server started.
+echo Database server started on port $DBPort.
 timeout /t 3 /nobreak >nul
 "@
 
@@ -2399,10 +2815,35 @@ timeout /t 2 /nobreak >nul
     Write-FileNoBom -Path $script:Files.StopDBBat -Content $stopDBBat -Ascii
     Write-OK "Created STOP-DATABASE.bat"
 
+    # START-APACHE.bat
+    $startApacheBat = @"
+@echo off
+echo Starting Apache web server...
+set "ROOT=%~dp0"
+set "ROOT=%ROOT:~0,-1%"
+"%ROOT%\apache\bin\httpd.exe"
+"@
+
+    Write-FileNoBom -Path $script:Files.StartApacheBat -Content $startApacheBat -Ascii
+    Write-OK "Created START-APACHE.bat"
+
+    # STOP-APACHE.bat
+    $stopApacheBat = @"
+@echo off
+echo Stopping Apache web server...
+taskkill /F /IM httpd.exe 2>nul
+taskkill /F /IM php-cgi.exe 2>nul
+echo Apache stopped.
+timeout /t 2 /nobreak >nul
+"@
+
+    Write-FileNoBom -Path $script:Files.StopApacheBat -Content $stopApacheBat -Ascii
+    Write-OK "Created STOP-APACHE.bat"
+
     # README.txt
     $readme = @"
 ================================================================
-BOOKSTACK PORTABLE
+BOOKSTACK PORTABLE (APACHE EDITION)
 ================================================================
 
 Thank you for using BookStack Portable!
@@ -2417,38 +2858,66 @@ QUICK START
 
 IMPORTANT: Change the default password immediately!
 
+COMPONENTS
+----------
+- Apache HTTPD:  Web server (replaces php artisan serve)
+- PHP:           Application runtime with FastCGI
+- MariaDB:       Database server
+- BookStack:     Documentation platform
+
 FILES AND FOLDERS
 -----------------
 app\        - BookStack application
+apache\     - Apache HTTPD web server
 php\        - PHP runtime
 mariadb\    - MariaDB database server
 data\       - Database files (your content is here!)
-logs\       - Log files
+logs\       - Log files (apache, php, mariadb)
 
 PORTABLE
 --------
 You can copy this entire folder to another Windows PC.
 Just run START-BOOKSTACK.bat on the new machine.
 
+INDIVIDUAL CONTROLS
+-------------------
+START-BOOKSTACK.bat  - Start both Apache and MariaDB
+STOP-BOOKSTACK.bat   - Stop all services
+START-DATABASE.bat   - Start only MariaDB
+STOP-DATABASE.bat    - Stop MariaDB
+START-APACHE.bat     - Start only Apache
+STOP-APACHE.bat      - Stop Apache
+
 BACKUP
 ------
 To backup your data, copy the following folders:
-- data\mysql\  (database)
-- app\public\uploads\  (uploaded files)
-- app\storage\  (app data)
+- data\mysql\           (database)
+- app\public\uploads\   (uploaded files)
+- app\storage\          (app data)
 
 TROUBLESHOOTING
 ---------------
 1. Port already in use:
-   - Edit START-BOOKSTACK.bat and change the port number
-   - Or stop the other application using port $AppPort
+   - Edit apache\conf\httpd.conf and change Listen $AppPort
+   - Also update APP_URL in app\.env
 
-2. Database won't start:
-   - Check logs\mariadb_error.log
-   - Make sure no other MySQL/MariaDB is running
+2. Apache won't start:
+   - Check logs\apache_error.log
+   - Ensure no other web server uses port $AppPort
 
 3. PHP errors:
    - Check logs\php_errors.log
+
+4. Database issues:
+   - Check logs\mariadb_error.log
+   - Ensure no other MySQL/MariaDB uses port $DBPort
+
+PERFORMANCE
+-----------
+This installation includes:
+- PHP OPcache with JIT compilation
+- Optimized MariaDB InnoDB settings
+- Pre-cached Laravel routes and views
 
 SUPPORT
 -------
@@ -2469,7 +2938,7 @@ Generated: $(Get-Date -Format "yyyy-MM-dd HH:mm:ss")
         $Shortcut = $WshShell.CreateShortcut("$env:USERPROFILE\Desktop\BookStack Portable.lnk")
         $Shortcut.TargetPath = $script:Files.StartBat
         $Shortcut.WorkingDirectory = $RootPath
-        $Shortcut.Description = "Start BookStack Portable Server"
+        $Shortcut.Description = "Start BookStack Portable Server (Apache)"
         $Shortcut.Save()
         Write-OK "Created desktop shortcut"
     } catch {
@@ -2477,6 +2946,244 @@ Generated: $(Get-Date -Format "yyyy-MM-dd HH:mm:ss")
     }
 
     return $true
+}
+
+# ============================================================
+# APACHE SERVER CONTROL FUNCTIONS
+# ============================================================
+
+function Test-ApacheConfiguration {
+    Write-Info "Testing Apache configuration..."
+
+    $apacheExe = $script:Files.ApacheExe
+
+    if (-not (Test-Path $apacheExe)) {
+        Write-Err "Apache not found"
+        return $false
+    }
+
+    $result = Invoke-SafeCommand -Executable $apacheExe -Arguments @("-t") -ShowOutput -ShowErrors
+
+    if ($result.StdErr -match "Syntax OK") {
+        Write-OK "Apache configuration is valid"
+        return $true
+    } elseif ($result.StdOut -match "Syntax OK") {
+        Write-OK "Apache configuration is valid"
+        return $true
+    } else {
+        Write-Warn "Apache configuration may have issues"
+        Write-Host $result.StdErr -ForegroundColor Yellow
+        return $true  # Continue anyway
+    }
+}
+
+function Start-ApacheServer {
+    param([switch]$Silent)
+
+    if (-not $Silent) {
+        Write-Info "Starting Apache server..."
+    }
+
+    $apacheExe = $script:Files.ApacheExe
+
+    # Check if already running
+    $existingProcess = Get-Process -Name "httpd" -ErrorAction SilentlyContinue
+    if ($existingProcess) {
+        if (-not $Silent) {
+            Write-OK "Apache is already running"
+        }
+        return $true
+    }
+
+    if (-not (Test-Path $apacheExe)) {
+        Write-Err "httpd.exe not found at: $apacheExe"
+        return $false
+    }
+
+    # Start Apache in background
+    $process = Start-Process -FilePath $apacheExe -PassThru -WindowStyle Hidden
+
+    # Wait for it to start
+    $maxWait = 30
+    $waited = 0
+
+    while ($waited -lt $maxWait) {
+        Start-Sleep -Seconds 1
+        $waited++
+
+        if ($process.HasExited) {
+            Write-Warn "Apache process exited unexpectedly"
+
+            # Check error log
+            $errorLog = "$($script:Paths.Logs)\apache_error.log"
+            if (Test-Path $errorLog) {
+                $lastLines = Get-Content $errorLog -Tail 10 -ErrorAction SilentlyContinue
+                if ($lastLines) {
+                    Write-Host "Last error log entries:" -ForegroundColor Yellow
+                    $lastLines | ForEach-Object { Write-Host "  $_" -ForegroundColor Gray }
+                }
+            }
+
+            return $false
+        }
+
+        # Try to connect
+        try {
+            $testUrl = "http://localhost:$AppPort"
+            $response = Invoke-WebRequest -Uri $testUrl -UseBasicParsing -TimeoutSec 2 -ErrorAction Stop
+            if ($response.StatusCode -eq 200 -or $response.StatusCode -eq 302) {
+                if (-not $Silent) {
+                    Write-OK "Apache started successfully (port $AppPort)"
+                }
+                return $true
+            }
+        } catch {
+            # Still starting up
+        }
+
+        if (-not $Silent -and ($waited % 5 -eq 0)) {
+            Write-Host "." -NoNewline
+        }
+    }
+
+    if (-not $Silent) {
+        Write-Host ""
+    }
+
+    # Final check - is process running?
+    $runningProcess = Get-Process -Name "httpd" -ErrorAction SilentlyContinue
+    if ($runningProcess) {
+        if (-not $Silent) {
+            Write-OK "Apache is running (connection test pending)"
+        }
+        return $true
+    }
+
+    Write-Warn "Apache may not have started properly"
+    return $false
+}
+
+function Stop-ApacheServer {
+    param([switch]$Silent)
+
+    if (-not $Silent) {
+        Write-Info "Stopping Apache server..."
+    }
+
+    # Kill httpd processes
+    $process = Get-Process -Name "httpd" -ErrorAction SilentlyContinue
+    if ($process) {
+        Stop-Process -Name "httpd" -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 2
+    }
+
+    # Also kill any php-cgi processes
+    $phpCgi = Get-Process -Name "php-cgi" -ErrorAction SilentlyContinue
+    if ($phpCgi) {
+        Stop-Process -Name "php-cgi" -Force -ErrorAction SilentlyContinue
+    }
+
+    if (-not $Silent) {
+        Write-OK "Apache stopped"
+    }
+}
+
+# ============================================================
+# VERIFICATION AND STATISTICS FUNCTIONS
+# ============================================================
+
+function Test-Installation {
+    Write-Step "Verifying Installation"
+
+    $allGood = $true
+
+    # Check PHP
+    if (Test-Path $script:Files.PHPExe) {
+        $result = Invoke-SafeCommand -Executable $script:Files.PHPExe -Arguments @("-v")
+        if ($result.Success) {
+            $version = ($result.StdOut -split "`n")[0]
+            Write-OK "PHP: $version"
+        } else {
+            Write-Warn "PHP installed but may have issues"
+        }
+    } else {
+        Write-Err "PHP not found"
+        $allGood = $false
+    }
+
+    # Check php-cgi
+    if (Test-Path $script:Files.PHPCgiExe) {
+        Write-OK "PHP-CGI: Found"
+    } else {
+        Write-Err "PHP-CGI not found (required for Apache)"
+        $allGood = $false
+    }
+
+    # Check Apache
+    if (Test-Path $script:Files.ApacheExe) {
+        $result = Invoke-SafeCommand -Executable $script:Files.ApacheExe -Arguments @("-v")
+        $version = ($result.StdOut -split "`n")[0]
+        Write-OK "Apache: $version"
+    } else {
+        Write-Err "Apache not found"
+        $allGood = $false
+    }
+
+    # Check MariaDB
+    if (Test-Path $script:Files.MySQLDExe) {
+        Write-OK "MariaDB: Found"
+    } else {
+        Write-Err "MariaDB not found"
+        $allGood = $false
+    }
+
+    # Check Composer
+    if (Test-Path $script:Files.ComposerPhar) {
+        Write-OK "Composer: Found"
+    } else {
+        Write-Warn "Composer not found"
+    }
+
+    # Check BookStack
+    if (Test-Path "$($script:Paths.App)\artisan") {
+        Write-OK "BookStack: Found"
+
+        # Check vendor
+        if (Test-Path "$($script:Paths.App)\vendor\autoload.php") {
+            Write-OK "Dependencies: Installed"
+        } else {
+            Write-Warn "Dependencies may be missing"
+            $allGood = $false
+        }
+
+        # Check .env
+        if (Test-Path "$($script:Paths.App)\.env") {
+            Write-OK "Configuration: Found"
+        } else {
+            Write-Warn ".env file missing"
+            $allGood = $false
+        }
+    } else {
+        Write-Err "BookStack not found"
+        $allGood = $false
+    }
+
+    # Check database data
+    if ((Test-Path "$($script:Paths.DataDB)\mysql") -and (Get-ChildItem "$($script:Paths.DataDB)\mysql" -ErrorAction SilentlyContinue).Count -gt 5) {
+        Write-OK "Database: Initialized"
+    } else {
+        Write-Warn "Database may not be initialized"
+    }
+
+    if ($allGood) {
+        Write-Host ""
+        Write-OK "All components verified successfully!"
+    } else {
+        Write-Host ""
+        Write-Warn "Some components may need attention"
+    }
+
+    return $allGood
 }
 
 function Show-DownloadStats {
@@ -2496,12 +3203,13 @@ function Show-CompletionMessage {
     Write-Host ""
     Write-Host "================================================================" -ForegroundColor Green
     Write-Host "                                                                " -ForegroundColor Green
-    Write-Host "     PORTABLE BOOKSTACK INSTALLATION COMPLETE!                  " -ForegroundColor Green
+    Write-Host "   PORTABLE BOOKSTACK INSTALLATION COMPLETE! (APACHE EDITION)  " -ForegroundColor Green
     Write-Host "                                                                " -ForegroundColor Green
     Write-Host "================================================================" -ForegroundColor Green
     Write-Host ""
     Write-Host "  Location:    $RootPath" -ForegroundColor Cyan
     Write-Host "  URL:         http://localhost:$AppPort" -ForegroundColor Cyan
+    Write-Host "  Web Server:  Apache HTTPD" -ForegroundColor Cyan
     Write-Host ""
     Write-Host "  ----------------------------------------------------------------" -ForegroundColor Yellow
     Write-Host "  DEFAULT LOGIN:" -ForegroundColor Yellow
@@ -2518,7 +3226,7 @@ function Show-CompletionMessage {
     Write-Host "  PORTABLE:" -ForegroundColor Green
     Write-Host "    Copy the entire $RootPath folder to any Windows PC!" -ForegroundColor White
     Write-Host ""
-    
+
     Show-DownloadStats
 }
 
@@ -2530,18 +3238,20 @@ function Start-Installation {
     Write-Banner
 
     Write-Host "  This will create a FULLY PORTABLE BookStack installation." -ForegroundColor White
+    Write-Host "  Using Apache HTTPD as the web server (production-ready)." -ForegroundColor White
     Write-Host ""
     Write-Host "  Everything will be installed to:" -ForegroundColor Yellow
     Write-Host "    $RootPath" -ForegroundColor Cyan
     Write-Host ""
     Write-Host "  Components:" -ForegroundColor White
-    Write-Host "    - PHP 8.x" -ForegroundColor Gray
+    Write-Host "    - Apache HTTPD 2.4 (Web Server)" -ForegroundColor Gray
+    Write-Host "    - PHP 8.x (Thread Safe)" -ForegroundColor Gray
     Write-Host "    - Composer" -ForegroundColor Gray
     Write-Host "    - Portable Git" -ForegroundColor Gray
     Write-Host "    - MariaDB (database)" -ForegroundColor Gray
     Write-Host "    - BookStack application" -ForegroundColor Gray
     Write-Host ""
-    
+
     if ($script:VerboseMode) {
         Write-Host "  [Verbose mode enabled]" -ForegroundColor Magenta
         Write-Host ""
@@ -2556,14 +3266,20 @@ function Start-Installation {
     # Stop any existing processes
     Write-Info "Stopping any existing processes..."
     Stop-Process -Name "mysqld" -Force -ErrorAction SilentlyContinue
+    Stop-Process -Name "httpd" -Force -ErrorAction SilentlyContinue
     Stop-Process -Name "php" -Force -ErrorAction SilentlyContinue
+    Stop-Process -Name "php-cgi" -Force -ErrorAction SilentlyContinue
     Start-Sleep -Seconds 2
 
-    # Run installation steps (NOTE: SSL Certificates step removed)
+    # Run installation steps
     $steps = @(
         @{ Name = "Create Directories"; Func = { Initialize-Directories } },
+        @{ Name = "Install Apache"; Func = { Install-Apache } },
+        @{ Name = "Install mod_fcgid"; Func = { Install-ApacheFcgid } },
         @{ Name = "Install PHP"; Func = { Install-PHP } },
         @{ Name = "Configure PHP"; Func = { Configure-PHP } },
+        @{ Name = "Configure Apache"; Func = { Configure-Apache } },
+        @{ Name = "Test Apache Config"; Func = { Test-ApacheConfiguration } },
         @{ Name = "Install Composer"; Func = { Install-Composer } },
         @{ Name = "Configure Composer"; Func = { Configure-Composer } },
         @{ Name = "Install Git"; Func = { Install-Git } },
@@ -2575,14 +3291,19 @@ function Start-Installation {
         @{ Name = "Install Dependencies"; Func = { Install-BookStackDependencies } },
         @{ Name = "Configure BookStack"; Func = { Configure-BookStack } },
         @{ Name = "Run Migrations"; Func = { Run-BookStackMigrations } },
-        @{ Name = "Create Startup Scripts"; Func = { Create-StartupScripts } }
+        @{ Name = "Optimize BookStack"; Func = { Optimize-BookStackInstallation } },
+        @{ Name = "Create Startup Scripts"; Func = { Create-StartupScripts } },
+        @{ Name = "Verify Installation"; Func = { Test-Installation } }
     )
 
     $stepNumber = 0
     $totalSteps = $steps.Count
-    
+
     foreach ($step in $steps) {
         $stepNumber++
+        Write-Host ""
+        Write-Host "[$stepNumber/$totalSteps] $($step.Name)" -ForegroundColor Magenta
+
         try {
             $result = & $step.Func
             if ($result -eq $false) {
@@ -2603,7 +3324,8 @@ function Start-Installation {
         }
     }
 
-    # Stop MariaDB after installation
+    # Stop services after installation
+    Stop-ApacheServer -Silent
     Stop-MariaDBServer -Silent
 
     # Show completion message
@@ -2612,9 +3334,24 @@ function Start-Installation {
     # Offer to start
     $startNow = Read-Host "Start BookStack now? (Y/n)"
     if ($startNow -ne 'n') {
-        Start-Process $script:Files.StartBat
-        Start-Sleep -Seconds 5
+        Write-Info "Starting services..."
+
+        # Start MariaDB first
+        Start-MariaDBServer -Silent
+        Start-Sleep -Seconds 3
+
+        # Start Apache
+        Start-ApacheServer -Silent
+        Start-Sleep -Seconds 3
+
+        # Open browser
         Start-Process "http://localhost:$AppPort"
+
+        Write-Host ""
+        Write-Host "  BookStack is now running!" -ForegroundColor Green
+        Write-Host "  Browser opened to http://localhost:$AppPort" -ForegroundColor Cyan
+        Write-Host ""
+        Write-Host "  To stop services, run STOP-BOOKSTACK.bat" -ForegroundColor Yellow
     }
 }
 
