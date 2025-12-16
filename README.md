@@ -22,6 +22,7 @@ Tired of complicated software installs? This script takes care of absolutely eve
        width="180" 
        height="150" />
 </div>
+
 ## ✨ Why Go Portable?
 
 | Feature | Description | Benefit |
