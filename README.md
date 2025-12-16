@@ -1,8 +1,10 @@
 # 📖 Portable BookStack Installer for Windows
 
-**A fully automated PowerShell script that sets up a totally self-contained, portable installation of [BookStack](https://www.bookstackapp.com/), a simple, self-hosted wiki and knowledge base, on Windows.**
+**A fully automated PowerShell script that sets up a totally self-contained, portable installation of [BookStack](https://www.bookstackapp.com/).
+A simple, self-hosted wiki and knowledge base, on Windows.**
 
-Tired of complicated software installs? This script takes care of absolutely everything, from downloading all the necessary dependencies to fine-tuning the performance. The result is a complete, ready-to-run environment packed neatly into a single folder.
+Tired of complicated software installs? This script takes care of absolutely everything, from downloading all the necessary dependencies to fine-tuning the performance. 
+The result is a complete, ready-to-run environment packed neatly into a single folder.
 
   * The `BookStack Control Center` PowerShell script for super easy management of your portable instances.
   * The `Bookstack Migration Tool` Powershell script to make migrations from old Bookstacks to new Bookstack Editions
