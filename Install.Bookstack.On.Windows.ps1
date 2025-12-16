@@ -1,7 +1,7 @@
 ﻿#Requires -RunAsAdministrator
 <#
 .SYNOPSIS
-    Portable BookStack Complete Installation Script for Windows (Apache Edition)
+    Portable BookStack Complete Installation Script for Windows
 
 .DESCRIPTION
     Creates a fully portable, self-contained BookStack installation.
@@ -44,10 +44,10 @@
     The port for MariaDB. Default: 3366
 
 .EXAMPLE
-    .\Install-BookStack-Portable-Apache.ps1
+    .\Install.Bookstack.On.Windows.ps1
 
 .EXAMPLE
-    .\Install-BookStack-Portable-Apache.ps1 -RootPath "D:\BookStack" -AppPort "8000"
+    .\Install.Bookstack.On.Windows.ps1 -RootPath "D:\BookStack" -AppPort "8000"
 #>
 
 param(
