@@ -3238,7 +3238,7 @@ function Start-Installation {
     Write-Banner
 
     Write-Host "  This will create a FULLY PORTABLE BookStack installation." -ForegroundColor White
-    Write-Host "  Using Apache HTTPD as the web server (production-ready)." -ForegroundColor White
+    Write-Host "  Using Apache HTTPD as the web server." -ForegroundColor White
     Write-Host ""
     Write-Host "  Everything will be installed to:" -ForegroundColor Yellow
     Write-Host "    $RootPath" -ForegroundColor Cyan
