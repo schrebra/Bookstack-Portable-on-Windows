@@ -5,9 +5,23 @@
 Tired of complicated software installs? This script takes care of absolutely everything, from downloading all the necessary dependencies to fine-tuning the performance. The result is a complete, ready-to-run environment packed neatly into a single folder.
 
   * The `BookStack Control Center` PowerShell script for super easy management of your portable instances.
-
-<img src="https://github.com/user-attachments/assets/51c96459-b2d3-429d-aed2-7d0b94ef91f2" alt="image alt text" width="400" />
-
+  * The `Bookstack Migration Tool` Powershell script to make migrations from old Bookstacks to new Bookstack Editions
+<div align="center">
+  <img src="https://github.com/user-attachments/assets/51c96459-b2d3-429d-aed2-7d0b94ef91f2" 
+       alt="Bookstack Control Center" 
+       width="250" 
+       height="200" />
+  &nbsp; &nbsp; 
+  <img src="https://github.com/user-attachments/assets/907e9790-dbad-406c-bf15-c4dcaa82ea40" 
+       alt="Bookstack Migration Tool" 
+       width="250" 
+       height="150" />
+  &nbsp; &nbsp; 
+  <img src="https://github.com/user-attachments/assets/f07afa1d-8951-45ee-b4f2-1ccd4281a6cd" 
+       alt="Bookstack Installer" 
+       width="180" 
+       height="150" />
+</div>
 ## ✨ Why Go Portable?
 
 | Feature | Description | Benefit |
