@@ -165,3 +165,23 @@ This installation script is open-source.
 
   * BookStack itself is licensed under the **MIT license**.
   * The other components it downloads (Apache, PHP, MariaDB) follow their own respective open-source licenses.
+-----
+
+## ⚖️ Project Status and Transparency
+
+This code is provided to the community **"as is"** (as you see it) with the goal of being helpful and functional.
+
+### Our Commitment
+
+While we strive to provide high-quality and reliable code, please note:
+
+* We cannot offer any express or implied **guarantees or warranties** regarding its performance, suitability for a specific purpose, or lack of defects.
+* The author(s) and contributors are not liable for any issues or damage that may arise from using this software.
+
+### 🛡️ Best Practices for Use
+
+We encourage responsible testing and deployment, especially in critical environments. Before running this code on a production server, we strongly recommend that you:
+
+1.  **Always test first** in a staging or development environment.
+2.  **Verify your backups** are complete and working, ensuring you have a safe restore point.
+3.  Understand that using the code means you are accepting responsibility for assessing its suitability for your specific needs.
