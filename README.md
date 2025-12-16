@@ -17,7 +17,7 @@ Tired of complicated software installs? This script takes care of absolutely eve
        width="250" 
        height="150" />
   &nbsp; &nbsp; 
-  <img src="https://github.com/user-attachments/assets/f07afa1d-8951-45ee-b4f2-1ccd4281a6cd" 
+  <img src="https://github.com/user-attachments/assets/3ba0a687-5645-4166-ace7-dff020f091f5"
        alt="Bookstack Installer" 
        width="180" 
        height="150" />
